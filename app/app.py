@@ -10,16 +10,17 @@ app = FastAPI(title="String Analyzer API")
 
 models.Base.metadata.create_all(bind=database.engine)
 
-@app.get("/")
-def read_root():
-    return {"message": "String Analyzer API is running!"}
-
+    
 def get_db():
     db = database.SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+@app.get("/")
+def read_root():
+    return {"message": "String Analyzer API is running!"}
 
 def analyze_string(value: str):
     length = len(value)
