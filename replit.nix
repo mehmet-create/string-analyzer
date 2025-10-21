@@ -1,8 +1,7 @@
-modules = ["python-3.11"]
+{ pkgs }: {
+  deps = [
+    pkgs.python311Full
+    pkgs.python311Packages.pip
+  ];
+}
 
-[agent]
-expertMode = true
-
-[nix]
-channel = "stable-25_05"
-packages = ["libxcrypt"]
