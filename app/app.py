@@ -4,10 +4,15 @@ from hashlib import sha256
 from datetime import datetime
 from . import models, schemas, database
 from typing import Optional
+from fastapi import FastAPI
 
 app = FastAPI(title="String Analyzer API")
 
 models.Base.metadata.create_all(bind=database.engine)
+
+@app.get("/")
+def read_root():
+    return {"message": "String Analyzer API is running!"}
 
 def get_db():
     db = database.SessionLocal()
@@ -39,6 +44,7 @@ def analyze_string(value: str):
 
 @app.post("/strings", response_model=schemas.StringResponse)
 def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
+    print(data)
     value = data.value.strip()
     if not value:
         raise HTTPException(status_code=400, detail="Value cannot be empty")
