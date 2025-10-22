@@ -2,17 +2,15 @@ from fastapi import FastAPI, HTTPException, Query, Depends, status
 from sqlalchemy.orm import Session
 from hashlib import sha256
 from datetime import datetime
-from . import models, schemas, database
+from app import models, schemas, database
 from typing import Optional
 import re
+import hashlib
 
 app = FastAPI(title="String Analyzer API")
 
+# Ensure your models and database setup are ready
 models.Base.metadata.create_all(bind=database.engine)
-
-@app.get("/")
-def read_root():
-    return {"message": "String Analyzer API is running!"}
     
 def get_db():
     db = database.SessionLocal()
@@ -20,6 +18,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@app.get("/")
+def read_root():
+    return {"message": "String Analyzer API is running!"}         
 
 def analyze_string(value: str):
     length = len(value)
@@ -60,12 +62,48 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
     db.refresh(new_entry)
     return new_entry
 
+@app.get("/strings/filter-by-natural-language")
+def filter_by_natural_language(
+    q: str = Query(..., description="Natural language query"), 
+    db: Session = Depends(get_db)
+):
+    """
+    Filters the stored strings based on natural language queries 
+    like 'palindrome', 'longest', or 'shortest'.
+    """
+    # print("Current DB entries:", db.query(models.StringModel).count())
+    print(q)
+    
+    q_lower = q.lower()
+
+    if "palindrome" in q_lower:
+        # Filter for palindromes
+        results = db.query(models.StringModel).filter(models.StringModel.is_palindrome == True).all()
+    elif "longest" in q_lower:
+        # Get the single longest string
+        results = db.query(models.StringModel).order_by(models.StringModel.length.desc()).limit(1).all()
+    elif "shortest" in q_lower:
+        # Get the single shortest string
+        results = db.query(models.StringModel).order_by(models.StringModel.length.asc()).limit(1).all()
+    elif "unique" in q_lower:
+        # Get the string with the most unique characters
+        results = db.query(models.StringModel).order_by(models.StringModel.unique_characters.desc()).limit(1).all()
+    else:
+        # If no supported keyword is found, raise HTTP 400
+        raise HTTPException(status_code=400, detail="Unsupported query: Must contain 'palindrome', 'longest', 'shortest', or 'unique'.")
+
+    # If results is empty after a valid query (e.g., no palindromes found)
+    if not results:
+        raise HTTPException(status_code=404, detail="String not found in the database based on the query criteria.")
+    return results
+
 @app.get("/strings/{value}", response_model=schemas.StringResponse)
 def get_string(value: str, db: Session = Depends(get_db)):
     hash_id = sha256(value.encode()).hexdigest()
     obj = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="String not found")
+    
     return obj
 
 @app.get("/strings")
@@ -103,7 +141,7 @@ def get_all_strings(
         "data": results,
         "count": len(results),
         "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
-    }
+    }    
 
 @app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
 def delete_string(value: str, db: Session = Depends(get_db)):
@@ -116,51 +154,3 @@ def delete_string(value: str, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {'message': 'String deleted successfully'}
-
-@app.get("/strings/filter-by-natural-language")
-def filter_by_natural_language(query: str, db: Session = Depends(get_db)):
-    query = query.lower().strip()
-    filters = {}
-
-    if "palindrome" in query or "palindromic" in query:
-        filters["is_palindrome"] = True
-
-    if "single word" in query or "one word" in query:
-        filters["word_count"] = 1
-
-    if "longer than" in query:
-        try:
-            num = int(query.split("longer than")[1].split()[0])
-            filters["min_length"] = num + 1
-        except:
-            raise HTTPException(status_code=400, detail="Couldn't parse length")
-
-    if "contain" in query or "containing" in query:
-        match = re.findall(r"\b[a-zA-Z]\b", query)
-        if match:
-            filters["contains_character"] = match[0]
-
-    if not filters:
-        raise HTTPException(status_code=400, detail="Unable to parse natural language query")
-
-    # Reuse normal filtering
-    q = db.query(models.StringModel)
-    if "is_palindrome" in filters:
-        q = q.filter(models.StringModel.is_palindrome == filters["is_palindrome"])
-    if "word_count" in filters:
-        q = q.filter(models.StringModel.word_count == filters["word_count"])
-    if "min_length" in filters:
-        q = q.filter(models.StringModel.length >= filters["min_length"])
-    if "contains_character" in filters:
-        q = q.filter(models.StringModel.value.contains(filters["contains_character"]))
-
-    results = q.all()
-
-    return {
-        "data": results,
-        "count": len(results),
-        "interpreted_query": {
-            "original": query,
-            "parsed_filters": filters
-        }
-    }
