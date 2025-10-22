@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends, status
 from sqlalchemy.orm import Session
 from hashlib import sha256
 from datetime import datetime
 from . import models, schemas, database
 from typing import Optional
-from fastapi import FastAPI
+import re
 
 app = FastAPI(title="String Analyzer API")
 
@@ -23,7 +23,7 @@ def get_db():
 
 def analyze_string(value: str):
     length = len(value)
-    is_palindrome = value == value[::-1]
+    is_palindrome = value.lower() == value.lower()[::-1]
     unique_chars = len(set(value))
     word_count = len(value.split())
     freq_map = {}
@@ -42,12 +42,12 @@ def analyze_string(value: str):
         "created_at": datetime.utcnow(),
     }
 
-@app.post("/strings", response_model=schemas.StringResponse)
+@app.post("/strings", response_model=schemas.StringResponse, status_code=status.HTTP_201_CREATED)
 def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
     print(data)
     value = data.value.strip()
     if not value:
-        raise HTTPException(status_code=400, detail="Value cannot be empty")
+        raise HTTPException(status_code=422, detail="Value cannot be empty")
 
     hash_id = sha256(value.encode()).hexdigest()
     existing = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
@@ -106,7 +106,7 @@ def get_all_strings(
         "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
     }
 
-@app.delete("/strings/{value}")
+@app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
 def delete_string(value: str, db: Session = Depends(get_db)):
     hash_id = sha256(value.encode()).hexdigest()
     obj = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
@@ -114,7 +114,7 @@ def delete_string(value: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="String not found")
     db.delete(obj)
     db.commit()
-    return {"message": "String deleted successfully"}
+    return
 
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(query: str, db: Session = Depends(get_db)):
@@ -135,11 +135,9 @@ def filter_by_natural_language(query: str, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="Couldn't parse length")
 
     if "contain" in query or "containing" in query:
-        words = query.split()
-        for w in words:
-            if len(w) == 1 and w.isalpha():
-                filters["contains_character"] = w
-                break
+        match = re.findall(r"\b[a-zA-Z]\b", query)
+        if match:
+            filters["contains_character"] = match[0]
 
     if not filters:
         raise HTTPException(status_code=400, detail="Unable to parse natural language query")
