@@ -44,7 +44,6 @@ def analyze_string(value: str):
 
 @app.post("/strings", response_model=schemas.StringResponse, status_code=status.HTTP_201_CREATED)
 def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
-    print(data)
     value = data.value.strip()
     if not value:
         raise HTTPException(status_code=422, detail="Value cannot be empty")
@@ -106,7 +105,7 @@ def get_all_strings(
         "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
     }
 
-@app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/strings/{value}",status_code=status.HTTP_200_OK)
 def delete_string(value: str, db: Session = Depends(get_db)):
     hash_id = sha256(value.encode()).hexdigest()
     obj = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
@@ -114,7 +113,7 @@ def delete_string(value: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="String not found")
     db.delete(obj)
     db.commit()
-    return
+    return {'message': 'String deleted successfully'}
 
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(query: str, db: Session = Depends(get_db)):
