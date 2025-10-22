@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Depends, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func, select
 from hashlib import sha256
 from datetime import datetime
 from app import models, schemas, database
@@ -9,7 +10,6 @@ import hashlib
 
 app = FastAPI(title="String Analyzer API")
 
-# Ensure your models and database setup are ready
 models.Base.metadata.create_all(bind=database.engine)
     
 def get_db():
@@ -56,7 +56,18 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="String already exists")
 
     result = analyze_string(value)
-    new_entry = models.StringModel(**result)
+
+    new_entry = models.StringModel(
+        id=result['id'],
+        value=result['value'],
+        length=result['length'],
+        is_palindrome=result['is_palindrome'],
+        unique_characters=result['unique_characters'],
+        word_count=result['word_count'],
+        character_frequency_map=result['character_frequency_map'],
+        created_at=result['created_at']
+    )
+
     db.add(new_entry)
     db.commit()
     db.refresh(new_entry)
@@ -64,49 +75,57 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
 
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(
-    q: list[str] = Query(..., description="Natural language query, e.g. 'palindrome', 'longest', 'shortest', 'unique'"),
+    q: list[str] = Query(..., description="Natural language query terms (can be repeated)"), 
     db: Session = Depends(get_db)
 ):
     """
-    Filters the stored strings based on natural language queries 
-    like 'palindrome', 'longest', 'shortest' or 'most unique'.
+    Filters the stored strings based on natural language queries.
+    Now supports combining one special filter ('longest', 'shortest', 'unique') 
+    with the 'palindrome' filter (e.g., 'longest palindrome').
     """
-    results = []
+    q_joined = " ".join(q).lower()
+    query = db.query(models.StringModel)
+    
+    filter_applied = False
 
-    for query_term in q:
-        q_lower = query_term.lower()
-        if "palindrome" in q_lower:
-            results.extend(db.query(models.StringModel).filter(models.StringModel.is_palindrome == True).all())
-        elif "longest" in q_lower:
-            max_length_obj = db.query(models.StringModel).order_by(models.StringModel.length.desc()).first()
-            if max_length_obj:
-                results.extend(db.query(models.StringModel).filter(models.StringModel.length == max_length_obj.length).all())
-        elif "shortest" in q_lower:
-            min_length_obj = db.query(models.StringModel).order_by(models.StringModel.length.asc()).first()
-            if min_length_obj:
-                results.extend(db.query(models.StringModel).filter(models.StringModel.length == min_length_obj.length).all())
-        elif "unique" in q_lower:
-            max_unique_obj = db.query(models.StringModel).order_by(models.StringModel.unique_characters.desc()).first()
-            if max_unique_obj:
-                results.extend(db.query(models.StringModel).filter(models.StringModel.unique_characters == max_unique_obj.unique_characters).all())
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported query: {query_term}")
+    if "longest" in q_joined:
+        max_length = db.query(func.max(models.StringModel.length)).scalar()
+        if max_length is not None:
+            query = query.filter(models.StringModel.length == max_length)
+            filter_applied = True
+            
+    elif "shortest" in q_joined:
+        min_length = db.query(func.min(models.StringModel.length)).scalar()
+        if min_length is not None:
+            query = query.filter(models.StringModel.length == min_length)
+            filter_applied = True
+            
+    elif "unique" in q_joined or "most unique" in q_joined:
+        max_unique = db.query(func.max(models.StringModel.unique_characters)).scalar()
+        if max_unique is not None:
+            query = query.filter(models.StringModel.unique_characters == max_unique)
+            filter_applied = True
+            
+    if "palindrome" in q_joined:
+        query = query.filter(models.StringModel.is_palindrome == True)
+        filter_applied = True
+        
+    if not filter_applied:
+        raise HTTPException(status_code=400, detail="Unsupported query: Must contain 'palindrome', 'longest', 'shortest', or 'unique'.")
+
+    results = query.all()
 
     if not results:
-        raise HTTPException(status_code=404, detail="String not found based on the query criteria.")
-
-    # Optional: remove duplicates if multiple queries return the same strings
-    results = list({r.id: r for r in results}.values())
+        raise HTTPException(status_code=404, detail="String not found in the database based on the combined criteria.")
 
     return results
 
 @app.get("/strings/{value}", response_model=schemas.StringResponse)
 def get_string(value: str, db: Session = Depends(get_db)):
-    hash_id = sha256(value.encode()).hexdigest()
+    hash_id = sha256(value.encode()).hexdigest() 
     obj = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
     if not obj:
         raise HTTPException(status_code=404, detail="String not found")
-    
     return obj
 
 @app.get("/strings")
@@ -144,7 +163,7 @@ def get_all_strings(
         "data": results,
         "count": len(results),
         "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
-    }    
+    }
 
 @app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
 def delete_string(value: str, db: Session = Depends(get_db)):
