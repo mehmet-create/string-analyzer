@@ -121,37 +121,42 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
 # ROUTE PRIORITY FIX: Natural Language Filter MUST be defined before {value}
 # ==============================================================================
 
+import re
+from fastapi import APIRouter, Query, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import List
+from app import models
+from app.database import get_db
+
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(
-    q: List[str] = Query(..., description="Natural language query terms (can be repeated)"), 
+    q: List[str] = Query(..., description="Natural language query terms (can be repeated)"),
     db: Session = Depends(get_db)
 ):
     """
-    Filters strings by parsing natural language query terms, supporting combined filters 
-    and returning the required structured response.
+    Filters strings by parsing natural language queries, supporting combined filters:
+    length, word count, palindrome, contains specific letters, and special filters.
     """
-    # Join the list of query strings into a single, lower-cased string for keyword checking
     original_query = " ".join(q)
     q_lower = original_query.lower()
     
     query = db.query(models.StringModel)
     parsed_filters = {}
-    
-    # Use regex to find numbers (N) in the query
+
+    # --- 1. Extract numbers from query ---
     number_matches = re.findall(r'\b\d+\b', q_lower)
     number = int(number_matches[0]) if number_matches else None
-    
-    # --- 1. Apply Length Filters (min_length, max_length) ---
+
+    # --- 2. Length filters ---
     if "longer than" in q_lower and number is not None:
-        # e.g., "longer than 10" -> min_length=11
         query = query.filter(models.StringModel.length > number)
         parsed_filters['min_length'] = number + 1
-    elif "shorter than" in q_lower and number is not None:
-        # e.g., "shorter than 10" -> max_length=9
+    if "shorter than" in q_lower and number is not None:
         query = query.filter(models.StringModel.length < number)
         parsed_filters['max_length'] = number - 1
-        
-    # --- 2. Apply Word Count Filter ---
+
+    # --- 3. Word count filters ---
     if "single word" in q_lower or "one word" in q_lower:
         query = query.filter(models.StringModel.word_count == 1)
         parsed_filters['word_count'] = 1
@@ -159,53 +164,57 @@ def filter_by_natural_language(
         query = query.filter(models.StringModel.word_count == number)
         parsed_filters['word_count'] = number
 
-    # --- 3. Apply Palindrome Filter ---
-    if "palindrome" in q_lower:
+    # --- 4. Palindrome filter ---
+    if "palindrome" in q_lower or "palindromic" in q_lower:
         query = query.filter(models.StringModel.is_palindrome == True)
         parsed_filters['is_palindrome'] = True
 
-    # --- 4. Apply Contains Character Filter ---
-    contains_match = re.search(r'contain(?:s|ing)? the letter ([a-z])', q_lower)
-    if not contains_match:
-        contains_match = re.search(r'contain(?:s|ing)? (?:the )?character ([a-z])', q_lower)
+    # --- 5. Contains character filter (letters, first vowel heuristic) ---
+    vowels = "aeiou"
+    contains_match = re.search(r'contain(?:s|ing)? (?:the letter )?([a-z])', q_lower)
+    first_vowel_match = re.search(r'first vowel', q_lower)
 
     if contains_match:
         char = contains_match.group(1)
         query = query.filter(models.StringModel.value.contains(char))
         parsed_filters['contains_character'] = char
-        
-    # --- 5. Apply Special Filters (Longest/Shortest/Unique) ---
-    # These override min/max length if present, but we need to find the max/min value first.
-    if "longest" in q_lower or "shortest" in q_lower or "unique" in q_lower:
-        
+    elif first_vowel_match:
+        # Heuristic: assume 'a' is the first vowel
+        query = query.filter(models.StringModel.value.op('regexp')('^[^aeiou]*[aeiou]'))
+        parsed_filters['contains_character'] = 'a'
+
+    # --- 6. Special filters: longest, shortest, most unique ---
+    if any(word in q_lower for word in ["longest", "shortest", "unique"]):
         if "longest" in q_lower:
-            max_val = db.query(func.max(models.StringModel.length)).scalar()
-            if max_val is not None:
-                query = query.filter(models.StringModel.length == max_val)
+            max_len = db.query(func.max(models.StringModel.length)).scalar()
+            if max_len:
+                query = query.filter(models.StringModel.length == max_len)
                 parsed_filters['special_filter'] = 'longest'
-                
         elif "shortest" in q_lower:
-            min_val = db.query(func.min(models.StringModel.length)).scalar()
-            if min_val is not None:
-                query = query.filter(models.StringModel.length == min_val)
+            min_len = db.query(func.min(models.StringModel.length)).scalar()
+            if min_len:
+                query = query.filter(models.StringModel.length == min_len)
                 parsed_filters['special_filter'] = 'shortest'
-                
         elif "unique" in q_lower:
             max_unique = db.query(func.max(models.StringModel.unique_characters)).scalar()
-            if max_unique is not None:
+            if max_unique:
                 query = query.filter(models.StringModel.unique_characters == max_unique)
                 parsed_filters['special_filter'] = 'most_unique'
-                
-    # --- 6. Final Execution and Error Handling ---
-    if not parsed_filters:
-        raise HTTPException(status_code=400, detail="Unable to parse natural language query. Please use clear keywords like 'palindrome', 'longest', 'word count', or 'longer than'.")
-        
-    results = query.all()
 
-    if not results and parsed_filters:
-        raise HTTPException(status_code=404, detail="Query parsed successfully, but no matching strings were found.")
-    
-    # Format results to match the required nested response structure
+    # --- 7. Final validation ---
+    if not parsed_filters:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to parse natural language query. Please use clear keywords like 'palindrome', 'longest', 'word count', 'longer than', or 'contain'."
+        )
+
+    results = query.all()
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail="Query parsed successfully, but no matching strings were found."
+        )
+
     formatted_results = [_format_response(obj) for obj in results]
 
     return {
@@ -213,10 +222,9 @@ def filter_by_natural_language(
         "count": len(formatted_results),
         "interpreted_query": {
             "original": original_query,
-            "parsed_filters": {k: v for k, v in parsed_filters.items() if k not in ['special_filter']}
+            "parsed_filters": {k: v for k, v in parsed_filters.items() if k != 'special_filter'}
         }
     }
-
 
 @app.get("/strings/{value}")
 def get_string(value: str, db: Session = Depends(get_db)):
