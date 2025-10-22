@@ -105,8 +105,10 @@ def get_all_strings(
         "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
     }
 
-@app.delete("/strings/{value}",status_code=status.HTTP_200_OK)
+@app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
 def delete_string(value: str, db: Session = Depends(get_db)):
+    if value.strip() == "":
+        raise HTTPException(status_code=422, detail="Value cannot be empty")
     hash_id = sha256(value.encode()).hexdigest()
     obj = db.query(models.StringModel).filter(models.StringModel.id == hash_id).first()
     if not obj:
