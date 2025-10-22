@@ -64,37 +64,40 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
 
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(
-    q: str = Query(..., description="Natural language query"), 
+    q: list[str] = Query(..., description="Natural language query, e.g. 'palindrome', 'longest', 'shortest', 'unique'"),
     db: Session = Depends(get_db)
 ):
     """
     Filters the stored strings based on natural language queries 
-    like 'palindrome', 'longest', or 'shortest'.
+    like 'palindrome', 'longest', 'shortest' or 'most unique'.
     """
-    # print("Current DB entries:", db.query(models.StringModel).count())
-    print(q)
-    
-    q_lower = q.lower()
+    results = []
 
-    if "palindrome" in q_lower:
-        # Filter for palindromes
-        results = db.query(models.StringModel).filter(models.StringModel.is_palindrome == True).all()
-    elif "longest" in q_lower:
-        # Get the single longest string
-        results = db.query(models.StringModel).order_by(models.StringModel.length.desc()).limit(1).all()
-    elif "shortest" in q_lower:
-        # Get the single shortest string
-        results = db.query(models.StringModel).order_by(models.StringModel.length.asc()).limit(1).all()
-    elif "unique" in q_lower:
-        # Get the string with the most unique characters
-        results = db.query(models.StringModel).order_by(models.StringModel.unique_characters.desc()).limit(1).all()
-    else:
-        # If no supported keyword is found, raise HTTP 400
-        raise HTTPException(status_code=400, detail="Unsupported query: Must contain 'palindrome', 'longest', 'shortest', or 'unique'.")
+    for query_term in q:
+        q_lower = query_term.lower()
+        if "palindrome" in q_lower:
+            results.extend(db.query(models.StringModel).filter(models.StringModel.is_palindrome == True).all())
+        elif "longest" in q_lower:
+            max_length_obj = db.query(models.StringModel).order_by(models.StringModel.length.desc()).first()
+            if max_length_obj:
+                results.extend(db.query(models.StringModel).filter(models.StringModel.length == max_length_obj.length).all())
+        elif "shortest" in q_lower:
+            min_length_obj = db.query(models.StringModel).order_by(models.StringModel.length.asc()).first()
+            if min_length_obj:
+                results.extend(db.query(models.StringModel).filter(models.StringModel.length == min_length_obj.length).all())
+        elif "unique" in q_lower:
+            max_unique_obj = db.query(models.StringModel).order_by(models.StringModel.unique_characters.desc()).first()
+            if max_unique_obj:
+                results.extend(db.query(models.StringModel).filter(models.StringModel.unique_characters == max_unique_obj.unique_characters).all())
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported query: {query_term}")
 
-    # If results is empty after a valid query (e.g., no palindromes found)
     if not results:
-        raise HTTPException(status_code=404, detail="String not found in the database based on the query criteria.")
+        raise HTTPException(status_code=404, detail="String not found based on the query criteria.")
+
+    # Optional: remove duplicates if multiple queries return the same strings
+    results = list({r.id: r for r in results}.values())
+
     return results
 
 @app.get("/strings/{value}", response_model=schemas.StringResponse)
