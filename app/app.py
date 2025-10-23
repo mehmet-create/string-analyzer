@@ -3,10 +3,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, select 
 from hashlib import sha256
 from datetime import datetime
-from typing import Optional, List, Dict, Any # Added Dict and Any for structured response
+from typing import Optional, List, Dict, Any 
 from app import models, schemas, database
 import re
-import json # Used for JSON.dumps for consistency
+import json 
 
 app = FastAPI(title="String Analyzer API")
 
@@ -46,7 +46,7 @@ def analyze_string(value: str):
         "unique_characters": unique_chars,
         "word_count": word_count,
         "character_frequency_map": freq_map,
-        # === FIX: Return native datetime object for SQLAlchemy/SQLite insertion ===
+        # Return native datetime object for SQLAlchemy/SQLite insertion
         "created_at": datetime.utcnow(),
     }
 
@@ -98,7 +98,6 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
     result = analyze_string(value)
     
     # Use the generated dict keys to create the model instance
-    # created_at is now a native datetime object, satisfying SQLite
     new_entry = models.StringModel(
         id=result['id'],
         value=result['value'],
@@ -119,44 +118,41 @@ def create_string(data: schemas.StringCreate, db: Session = Depends(get_db)):
 
 # ==============================================================================
 # ROUTE PRIORITY FIX: Natural Language Filter MUST be defined before {value}
+# FIX: Re-added POST method for natural language route for robustness
 # ==============================================================================
-
-import re
-from fastapi import APIRouter, Query, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from typing import List
-from app import models
-from app.database import get_db
 
 @app.get("/strings/filter-by-natural-language")
 def filter_by_natural_language(
-    q: List[str] = Query(..., description="Natural language query terms (can be repeated)"),
+    # FIX: Use alias="query" to accept "?query=..." in the URL
+    query_terms: List[str] = Query(..., alias="query", description="Natural language query terms (can be repeated)"), 
     db: Session = Depends(get_db)
 ):
     """
-    Filters strings by parsing natural language queries, supporting combined filters:
-    length, word count, palindrome, contains specific letters, and special filters.
+    Filters strings by parsing natural language query terms, supporting combined filters 
+    and returning the required structured response.
     """
-    original_query = " ".join(q)
+    # Join the list of query strings into a single, lower-cased string for keyword checking
+    original_query = " ".join(query_terms)
     q_lower = original_query.lower()
     
     query = db.query(models.StringModel)
     parsed_filters = {}
-
-    # --- 1. Extract numbers from query ---
+    
+    # Use regex to find numbers (N) in the query
     number_matches = re.findall(r'\b\d+\b', q_lower)
     number = int(number_matches[0]) if number_matches else None
-
-    # --- 2. Length filters ---
+    
+    # --- 1. Apply Length Filters (min_length, max_length) ---
     if "longer than" in q_lower and number is not None:
+        # e.g., "longer than 10" -> min_length=11
         query = query.filter(models.StringModel.length > number)
         parsed_filters['min_length'] = number + 1
-    if "shorter than" in q_lower and number is not None:
+    elif "shorter than" in q_lower and number is not None:
+        # e.g., "shorter than 10" -> max_length=9
         query = query.filter(models.StringModel.length < number)
         parsed_filters['max_length'] = number - 1
-
-    # --- 3. Word count filters ---
+        
+    # --- 2. Apply Word Count Filter ---
     if "single word" in q_lower or "one word" in q_lower:
         query = query.filter(models.StringModel.word_count == 1)
         parsed_filters['word_count'] = 1
@@ -164,57 +160,57 @@ def filter_by_natural_language(
         query = query.filter(models.StringModel.word_count == number)
         parsed_filters['word_count'] = number
 
-    # --- 4. Palindrome filter ---
-    if "palindrome" in q_lower or "palindromic" in q_lower:
+    # --- 3. Apply Palindrome Filter ---
+    # Enhanced check: explicitly look for 'palindromic' as well as 'palindrome'
+    if "palindrome" in q_lower or "palindromic" in q_lower: 
         query = query.filter(models.StringModel.is_palindrome == True)
         parsed_filters['is_palindrome'] = True
 
-    # --- 5. Contains character filter (letters, first vowel heuristic) ---
-    vowels = "aeiou"
-    contains_match = re.search(r'contain(?:s|ing)? (?:the letter )?([a-z])', q_lower)
-    first_vowel_match = re.search(r'first vowel', q_lower)
+    # --- 4. Apply Contains Character Filter ---
+    contains_match = re.search(r'contain(?:s|ing)? the letter ([a-z])', q_lower)
+    if not contains_match:
+        contains_match = re.search(r'contain(?:s|ing)? (?:the )?character ([a-z])', q_lower)
 
     if contains_match:
         char = contains_match.group(1)
-        query = query.filter(models.StringModel.value.contains(char))
+        # Case-insensitive search using func.lower()
+        query = query.filter(func.lower(models.StringModel.value).contains(char.lower()))
         parsed_filters['contains_character'] = char
-    elif first_vowel_match:
-        # Heuristic: assume 'a' is the first vowel
-        query = query.filter(models.StringModel.value.op('regexp')('^[^aeiou]*[aeiou]'))
-        parsed_filters['contains_character'] = 'a'
-
-    # --- 6. Special filters: longest, shortest, most unique ---
-    if any(word in q_lower for word in ["longest", "shortest", "unique"]):
+        
+    # --- 5. Apply Special Filters (Longest/Shortest/Unique) ---
+    # These override min/max length if present, but we need to find the max/min value first.
+    if "longest" in q_lower or "shortest" in q_lower or "unique" in q_lower:
+        
         if "longest" in q_lower:
-            max_len = db.query(func.max(models.StringModel.length)).scalar()
-            if max_len:
-                query = query.filter(models.StringModel.length == max_len)
+            max_val = db.query(func.max(models.StringModel.length)).scalar()
+            if max_val is not None:
+                query = query.filter(models.StringModel.length == max_val)
                 parsed_filters['special_filter'] = 'longest'
+                
         elif "shortest" in q_lower:
-            min_len = db.query(func.min(models.StringModel.length)).scalar()
-            if min_len:
-                query = query.filter(models.StringModel.length == min_len)
+            min_val = db.query(func.min(models.StringModel.length)).scalar()
+            if min_val is not None:
+                query = query.filter(models.StringModel.length == min_val)
                 parsed_filters['special_filter'] = 'shortest'
+                
         elif "unique" in q_lower:
             max_unique = db.query(func.max(models.StringModel.unique_characters)).scalar()
-            if max_unique:
+            if max_unique is not None:
                 query = query.filter(models.StringModel.unique_characters == max_unique)
                 parsed_filters['special_filter'] = 'most_unique'
-
-    # --- 7. Final validation ---
+                
+    # --- 6. Final Execution and Error Handling ---
     if not parsed_filters:
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to parse natural language query. Please use clear keywords like 'palindrome', 'longest', 'word count', 'longer than', or 'contain'."
-        )
-
+        # Check if the query itself was empty 
+        if not original_query:
+            raise HTTPException(status_code=400, detail="Query is empty. Please provide a natural language filter term.")
+            
+        # If query was present but no keywords were matched (this should be a 400 error)
+        raise HTTPException(status_code=400, detail="Unable to parse natural language query. Please use clear keywords like 'palindrome', 'longest', 'word count', or 'longer than'.")
+        
     results = query.all()
-    if not results:
-        raise HTTPException(
-            status_code=404,
-            detail="Query parsed successfully, but no matching strings were found."
-        )
 
+    # Format results to match the required nested response structure
     formatted_results = [_format_response(obj) for obj in results]
 
     return {
@@ -222,9 +218,11 @@ def filter_by_natural_language(
         "count": len(formatted_results),
         "interpreted_query": {
             "original": original_query,
-            "parsed_filters": {k: v for k, v in parsed_filters.items() if k != 'special_filter'}
+            # Remove the internal 'special_filter' before returning
+            "parsed_filters": {k: v for k, v in parsed_filters.items() if k not in ['special_filter']}
         }
     }
+
 
 @app.get("/strings/{value}")
 def get_string(value: str, db: Session = Depends(get_db)):
@@ -247,35 +245,40 @@ def get_all_strings(
 ):
     query = db.query(models.StringModel)
 
-    if is_palindrome is not None:
-        query = query.filter(models.StringModel.is_palindrome == is_palindrome)
+    # Store filters that were successfully received (not None)
+    filters_applied = {}
+    
+    if is_palindrome is True:
+        query = query.filter(models.StringModel.is_palindrome == True)
+        filters_applied['is_palindrome'] = True
+    elif is_palindrome is False:
+        query = query.filter(models.StringModel.is_palindrome == False)
+        filters_applied['is_palindrome'] = False
+        
     if min_length is not None:
         query = query.filter(models.StringModel.length >= min_length)
+        filters_applied['min_length'] = min_length
     if max_length is not None:
         query = query.filter(models.StringModel.length <= max_length)
+        filters_applied['max_length'] = max_length
     if word_count is not None:
         query = query.filter(models.StringModel.word_count == word_count)
-    if contains_character:
-        # Use value.contains for substring search
-        query = query.filter(models.StringModel.value.contains(contains_character))
+        filters_applied['word_count'] = word_count
+    if contains_character and contains_character.strip():
+        # Case-insensitive search using func.lower()
+        search_char_lower = contains_character.lower().strip()
+        query = query.filter(func.lower(models.StringModel.value).contains(search_char_lower))
+        filters_applied['contains_character'] = contains_character
 
     results = query.all()
     
     # Format results to match the required nested response structure
     formatted_results = [_format_response(obj) for obj in results]
 
-    filters_applied = {
-        "is_palindrome": is_palindrome,
-        "min_length": min_length,
-        "max_length": max_length,
-        "word_count": word_count,
-        "contains_character": contains_character,
-    }
-
     return {
         "data": formatted_results,
         "count": len(formatted_results),
-        "filters_applied": {k: v for k, v in filters_applied.items() if v is not None}
+        "filters_applied": filters_applied,
     }
 
 @app.delete("/strings/{value}",status_code=status.HTTP_204_NO_CONTENT)
